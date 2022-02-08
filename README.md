@@ -1,4 +1,4 @@
-# TBotAPI - Another Telegram Bot in Lua (Async Supported !)
+# TBotAPI - Another Telegram Bot in Lua
 - Async supported
 - Lot of weird hacks !
 - Each callback got their own thread
