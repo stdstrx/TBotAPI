@@ -18,7 +18,7 @@ end
 bot.max_connections = 16
 bot.debug = false
 
-bot:init('YOUR-BOT-TOKEN-HERE')
+bot = bot:init('YOUR-BOT-TOKEN-HERE')
 while true do
     bot:update(nil, 2)
 end
