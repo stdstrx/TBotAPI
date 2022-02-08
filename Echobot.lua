@@ -1,5 +1,8 @@
 #!/usr/bin/env luajit
 local bot = require('TBotAPI')
+bot.max_connections = 4
+bot.debug = false
+bot = bot:init('YOUR-BOT-TOKEN-HERE')
 
 -- Callback
 function bot:on_private_message(msg)
@@ -15,10 +18,6 @@ function bot:on_private_message(msg)
     return
 end
 
-bot.max_connections = 16
-bot.debug = false
-
-bot = bot:init('YOUR-BOT-TOKEN-HERE')
 while true do
     bot:update(nil, 2)
 end
