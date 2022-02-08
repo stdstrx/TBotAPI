@@ -6,7 +6,7 @@ local json = require('dkjson')              -- dkjson from luarocks
 local api = {
     tagname = 'TBotAPI',
     endpoint = 'api.telegram.org',
-    max_connections = 16,
+    max_connections = 8,
     debug = false
 }
 api.__index = api
@@ -32,7 +32,7 @@ function api:request(method, data, noreturn)
         repeat
             local resetThreshold = math.floor((self.max_connections / 100) * 10) -- Create new stream, if alive connection lower than 10%
             if not self._connection or #self._connection < resetThreshold then
-                if self.debug then self:log('Creating new stream ..') end
+                self:logd('Creating new %s stream ..', self.max_connections)
                 self._connection = {}
                 for c = 1, self.max_connections do
                     self._connection[c] = http_client.connect {
