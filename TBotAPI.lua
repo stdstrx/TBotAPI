@@ -30,8 +30,7 @@ function api:request(method, data, noreturn)
     local function streamer()
         local stream
         repeat
-            local resetThreshold = math.floor((self.max_connections / 100) * 10) -- Create new stream, if alive connection lower than 10%
-            if not self._connection or #self._connection < resetThreshold then
+            if not self._connection or #self._connection <= 0 then
                 self:logd('Creating new %s stream ..', self.max_connections)
                 self._connection = {}
                 for c = 1, self.max_connections do
@@ -44,9 +43,8 @@ function api:request(method, data, noreturn)
             self._active_connection = self._active_connection >= self.max_connections and 1 or self._active_connection + 1
             stream = self._connection[self._active_connection] ~= nil and self._connection[self._active_connection]:new_stream() or nil
             self._connection[self._active_connection] = stream == nil and nil or self._connection[self._active_connection]
+            self:logd('[Connection: %s / %s]: Stream: %s', self._active_connection, #self._connection, stream or 'Invalid')
         until stream ~= nil
-
-        self:logd('Using stream %s to connect', self._active_connection)
         return stream
     end
 
@@ -162,14 +160,14 @@ function api:update(limit, timeout, allowed_updates)
             if updates then
                 for idx, resp in pairs(updates.result) do
                     self._offset = resp.update_id + 1
-                    --self:logd('Processing %s update -> %s', self._offset, self:vardump(resp))
+                    self:logd('Processing %s update -> %s', self._offset, self:vardump(resp))
                     self._threads:wrap(function () return self:update_parser(resp) end)
                 end
             end
 
             self._crashDetect = nil
             self._isProcessing = false
-        elseif os.time() - self._crashDetect >= 8 then
+        elseif os.time() - self._crashDetect >= 8 then -- Restart connection if it hang for 8 second
             self:log('Crashed, restarting !')
             self._crashDetect = nil; self._isProcessing = nil; self._connection = nil
         end
@@ -182,12 +180,13 @@ function api:update(limit, timeout, allowed_updates)
     end
 
     
-    cqueues.sleep(0.00001) -- High CPU Usage hack !
+    cqueues.sleep(0.1) -- yield after 100ms
 end
-function api:init(token)
+function api:init(token, max_connections)
     local _new = setmetatable({
         token = token
     }, api)
+    _new.max_connections = max_connections or _new.max_connections
 
     local resp = _new:request('getMe')
     if not resp then
@@ -203,9 +202,6 @@ function api:init(token)
 end
 
 function api:vardump(table)
-    if not self.debug then
-        return ''
-    end
     return json.encode(table, { indent = true })
 end
 
