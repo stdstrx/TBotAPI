@@ -1,12 +1,16 @@
 local cqueues = require('cqueues')          -- cqueues from luarocks
 local http_header = require('http.headers') -- lua_http from luarocks
 local http_client = require('http.client')
+local http_server = require("http.server")
+local http_utils = require("http.util")
 local json = require('dkjson')              -- dkjson from luarocks
 
 local api = {
     tagname = 'TBotAPI',
     endpoint = 'api.telegram.org',
     max_connections = 8,
+    port = 8998, -- Default Webhook port
+    chat_delay = 0.3,
     debug = false
 }
 api.__index = api
@@ -20,11 +24,9 @@ function api:logd(str, ...)
         self:log(str, ...)
     end
 end
-function api:request(method, data, noreturn)
-    if noreturn then
-        self._threads:wrap(function ()
-            self:request(method, data)
-        end)
+function api:request(method, data, queue) 
+    if queue then
+        self._threads:wrap(function () self:request(method, data) end)
         return false
     end
     local function streamer()
@@ -34,6 +36,7 @@ function api:request(method, data, noreturn)
                 self:logd('Creating new %s stream ..', self.max_connections)
                 self._connection = {}
                 for c = 1, self.max_connections do
+                    repeat cqueues.sleep(0.1) until self._connection -- Protect from crash state
                     self._connection[c] = http_client.connect {
                         host = self.endpoint, port = 443, tls = true, version = 1.1
                     }
@@ -48,42 +51,69 @@ function api:request(method, data, noreturn)
         return stream
     end
 
+    self._rque, self._cque = self._rque or 0, self._cque or {}
+    self._cque = self._cque or {}
+    
+    
+    repeat
+        cqueues.sleep(0.1)
+    until self._rque <= 30
+    self._rque = self._rque + 1
+    --self:logd('Processing queue : %s', self._rque)
+
+    if data and data.chat_id then
+        self._cque[data.chat_id] = self._cque[data.chat_id] or 0
+        self._cque[data.chat_id] = self._cque[data.chat_id] + 1
+
+        local waiting = 0.1
+        if self._cque[data.chat_id] > 1 then
+            self:logd('chat_id: %s queue : running after %s second ..', data.chat_id, self._cque[data.chat_id], 1 * self._cque[data.chat_id])
+            waiting = self.chat_delay * self._cque[data.chat_id]
+        end
+        cqueues.sleep(waiting)
+        self._cque[data.chat_id] = self._cque[data.chat_id] - 1
+    end
+    
+
+    ::retry::
     local stream, resp
     repeat
         local endpoint = ('/bot%s/%s'):format(self.token, method)
         stream = streamer()
+
         
         local headers = http_header.new()
         headers:append(':scheme', 'https')
         headers:append(':path', endpoint)
         headers:append(':authority', 'api.telegram.org')
         
-        if not data then
-            self:logd('Processing %s using GET', endpoint)
-            headers:append(':method', 'GET')
-            stream:write_headers(headers, true)
-        else
-            local data = json.encode(data or {})
-
-            self:logd('Processing %s using POST\nData: %s', endpoint, data)
-            headers:append(':method', 'POST')
-            headers:append('content-type', 'application/json')
-
-            headers:append('content-length', tostring(#data))
-
-            stream:write_headers(headers, false)
-            stream:write_body_from_string(data)
-        end
+        local data = json.encode(data or {})
+        headers:append(':method', 'POST')
+        headers:append('content-type', 'application/json')
+        
+        headers:append('content-length', tostring(#data))
+        
+        self:logd('Connection: %s -> %s', endpoint, data)
+        stream:write_headers(headers, false)
+        stream:write_body_from_string(data)
 
         resp = stream:get_body_as_string()
     until resp
     stream:shutdown()
 
+    self._rque = self._rque - 1
+
     local respJs = json.decode(resp)
     if not respJs then
         return false, resp
     elseif not respJs.ok then
-        self:log('Error: %s [%s] -> %s', respJs.description, respJs.error_code, data and json.encode(data, {indent = true}) or 'No Data')
+        if respJs.error_code == 429 then
+            local retry_after = respJs.parameters.retry_after
+            self:log('Too fast, retrying after %s ...', retry_after)
+            cqueues.sleep(retry_after)
+            goto retry
+        end
+        self:log('Error: %s [%s] -> %s -> %s', respJs.description, respJs.error_code, api:vardump(respJs), data and json.encode(data) or 'No Data')
         return false, respJs
     end
     return respJs, resp
@@ -145,11 +175,76 @@ function api:update_parser(msg)
     self:log('Failed to parse msg, callback not supported -> %s', json.encode(msg, {indent = true}))
     return false
 end
+function api:webhook_update(listen_port, url, allowed_updates, max_connections)
+    if not self._hosted then
+        if not self:request('setWebhook', { 
+            url = url,
+            allowed_updates = allowed_updates,
+            max_connections = max_connections,
+            --drop_pending_updates = true
+        }) then error('Failed to use webhook update !') end
+
+        self.update = nil
+        self._hosted = http_server.listen({
+            host = '127.0.0.1',
+            port = listen_port or self.port,
+            onstream = function (server, stream)
+                local req_headers = assert(stream:get_headers())
+                local req = {
+                    method = req_headers:get(":method"),
+                    path = req_headers:get(":path"),
+                    len = req_headers:get("content-length"), 
+                    type = req_headers:get('content-type'),
+                    content = tostring(stream:get_body_as_string())
+                }
+
+                if self.debug then -- Debug request
+                    for name, value, never_index in req_headers:each() do
+                        self:log('Header: %s -> %s', tostring(name), tostring(value))
+                    end
+                    if req_method ~= 'GET' then
+                        self:log('Request Body -> %s\n', req.content)
+                    end
+                end
+
+                self._threads:wrap(function () return self:update_parser(json.decode(req.content)) end)
+                
+                local res_headers = http_header.new()
+                res_headers:append(":status", "200")
+                assert(stream:write_headers(res_headers, true))
+            end,
+            onerror = function(server, context, op, err, errno) 
+                self:log('%s on %s failed%s', op, context, err and ':' .. err or '')
+            end
+        })
+        assert(self._hosted:listen())
+        self:log("Webhook update initialized on port %d",select(3, self._hosted:localname()))
+    end
+
+
+    local stats, err = self._hosted:loop(0.01)
+    if not stats then
+        self:log('Webhook Thread error: %s', err)
+        return stats, err, 'Webhook Update'
+    end
+    
+    local stats, err = self._threads:loop(0.01)
+    if not stats then
+        self:log('Thread error: %s', err)
+        return stats, err, 'Threading'
+    end
+end
 function api:update(limit, timeout, allowed_updates)
     self._offset = self._offset or 0
-    self._threads = not self._threads and cqueues.new() or self._threads
     self._isProcessing = self._isProcessing or false
     self._crashDetect = self._crashDetect or os.time()
+
+    if not self._delWebhook then
+        self._delWebhook = true
+        self.webhook_update = nil
+        self:request('deleteWebhook')
+        self:log('Ready to received update via long polling !')
+    end
 
     local function updater()
         if not self._isProcessing then
@@ -161,10 +256,10 @@ function api:update(limit, timeout, allowed_updates)
                 for idx, resp in pairs(updates.result) do
                     self._offset = resp.update_id + 1
                     self:logd('Processing %s update -> %s', self._offset, self:vardump(resp))
-                    self._threads:wrap(function () return self:update_parser(resp) end)
+                    self._threads:wrap(function () return self:update_parser(resp) end) 
                 end
             end
-
+            
             self._crashDetect = nil
             self._isProcessing = false
         elseif os.time() - self._crashDetect >= 8 then -- Restart connection if it hang for 8 second
@@ -173,18 +268,27 @@ function api:update(limit, timeout, allowed_updates)
         end
     end
 
-    self._threads:wrap(updater)
-    local stats, err = self._threads:step(0.01)
-    if not stats then
-        self:log('Thread error: %s', err)
-    end
+    if not self._update then
+        self._update = true
 
+        self._threads:wrap(updater)
+        
+        local stats, err = self._threads:loop(0.01)
+        if not stats then
+            self:log('Thread error: %s', err)
+        end
+
+        self._update = false
+    end
     
     cqueues.sleep(0.1) -- yield after 100ms
 end
 function api:init(token, max_connections)
     local _new = setmetatable({
-        token = token
+        token = token,
+        queue = {},
+        queue_done = 0,
+        _threads = cqueues.new()
     }, api)
     _new.max_connections = max_connections or _new.max_connections
 
