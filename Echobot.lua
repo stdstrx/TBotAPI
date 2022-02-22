@@ -1,7 +1,9 @@
 #!/usr/bin/env luajit
+
 local bot = require('TBotAPI')
 bot.max_connections = 4
 bot.debug = false
+
 bot = bot:init('YOUR-BOT-TOKEN-HERE')
 
 -- Callback
@@ -20,4 +22,5 @@ end
 
 while true do
     bot:update(nil, 2)
+    --bot:webhook_update(8998, 'https://example.com/webhook' .. api.token)
 end
