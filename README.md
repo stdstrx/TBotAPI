@@ -2,6 +2,8 @@
 - Async supported
 - Lot of weird hacks !
 - Each callback got their own thread
+- WebHook Server Supported 🕸
+- Queuing / Rate Limiter 
 - Multi-connection to Telegram Bot Server
 - Using 5.1 Version Golden Standard LUA xD
 
