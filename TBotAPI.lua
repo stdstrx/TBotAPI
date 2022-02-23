@@ -24,9 +24,9 @@ function api:logd(str, ...)
         self:log(str, ...)
     end
 end
-function api:request(method, data, queue) 
+function api:request(method, data, queue, __unused__) 
     if queue then
-        self._threads:wrap(function () self:request(method, data) end)
+        self._threads:wrap(function () self:request(method, data, nil, true) end)
         return false
     end
     local function streamer()
@@ -54,27 +54,27 @@ function api:request(method, data, queue)
     self._rque, self._cque = self._rque or 0, self._cque or {}
     self._cque = self._cque or {}
     
-    
-    repeat
-        cqueues.sleep(0.1)
-    until self._rque <= 30
-    self._rque = self._rque + 1
-    --self:logd('Processing queue : %s', self._rque)
+    if __unused__ then
+        repeat
+            cqueues.sleep(0.1)
+        until self._rque <= 25
+        --self:logd('Processing queue : %s', self._rque)
 
-    if data and data.chat_id then
-        self._cque[data.chat_id] = self._cque[data.chat_id] or 0
-        self._cque[data.chat_id] = self._cque[data.chat_id] + 1
+        if data and data.chat_id then
+            self._cque[data.chat_id] = self._cque[data.chat_id] or 0
+            self._cque[data.chat_id] = self._cque[data.chat_id] + 1
 
-        local waiting = 0.1
-        if self._cque[data.chat_id] > 1 then
-            self:logd('chat_id: %s queue : running after %s second ..', data.chat_id, self._cque[data.chat_id], 1 * self._cque[data.chat_id])
-            waiting = self.chat_delay * self._cque[data.chat_id]
+            local waiting = 0
+            if self._cque[data.chat_id] > 1 then
+                waiting = self.chat_delay * self._cque[data.chat_id]
+                self:logd('chat_id: %s queue : running after %s second ..', data.chat_id, waiting)
+            end
+            cqueues.sleep(waiting)
+            self._cque[data.chat_id] = self._cque[data.chat_id] - 1
         end
-        cqueues.sleep(waiting)
-        self._cque[data.chat_id] = self._cque[data.chat_id] - 1
     end
+    self._rque = self._rque + 1
     
-
     ::retry::
     local stream, resp
     repeat
@@ -186,7 +186,7 @@ function api:webhook_update(listen_port, url, allowed_updates, max_connections)
 
         self.update = nil
         self._hosted = http_server.listen({
-            host = '127.0.0.1',
+            host = '0.0.0.0',
             port = listen_port or self.port,
             onstream = function (server, stream)
                 local req_headers = assert(stream:get_headers())
@@ -230,6 +230,7 @@ function api:webhook_update(listen_port, url, allowed_updates, max_connections)
     
     local stats, err = self._threads:loop(0.01)
     if not stats then
+        self._threads = cqueues.new() -- Re-iniitialized
         self:log('Thread error: %s', err)
         return stats, err, 'Threading'
     end
